@@ -1,0 +1,78 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum DeliveryStatus {
+  PENDING
+  DELIVERING
+  DELIVERED
+  FAILED
+}
+
+model Endpoint {
+  id            String   @id @default(uuid())
+  url           String
+  signingSecret String
+  eventTypes    String[]
+  enabled       Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  deliveries Delivery[]
+
+  @@map("endpoints")
+}
+
+model Event {
+  id                 String   @id @default(uuid())
+  eventType          String
+  payload            Json
+  idempotencyKey     String   @unique
+  requestFingerprint String
+  createdAt          DateTime @default(now())
+
+  deliveries Delivery[]
+
+  @@index([eventType])
+  @@map("events")
+}
+
+model Delivery {
+  id           String         @id @default(uuid())
+  eventId      String
+  endpointId   String
+  status       DeliveryStatus @default(PENDING)
+  attemptCount Int            @default(0)
+  nextRetryAt  DateTime       @default(now())
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  event    Event             @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  endpoint Endpoint          @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+  attempts DeliveryAttempt[]
+
+  @@unique([eventId, endpointId])
+  @@index([status, nextRetryAt])
+  @@map("deliveries")
+}
+
+model DeliveryAttempt {
+  id            String   @id @default(uuid())
+  deliveryId    String
+  attemptNumber Int
+  statusCode    Int?
+  error         String?
+  durationMs    Int
+  createdAt     DateTime @default(now())
+
+  delivery Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+
+  @@index([deliveryId])
+  @@map("delivery_attempts")
+}
