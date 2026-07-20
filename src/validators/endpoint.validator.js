@@ -1,10 +1,19 @@
 const { z } = require('zod');
+const env = require('../config/env');
+
+
+const ALLOWED_PROTOCOL =
+  env.NODE_ENV === 'production' ? /^https$/ : /^https?$/;
+
 
 const createEndpointSchema = z.object({
   body: z.object({
     url: z.url({
-      protocol: /^https$/,
-      error: 'Must be a valid https:// URL',
+      protocol: ALLOWED_PROTOCOL,
+      error:
+        env.NODE_ENV === 'production'
+          ? 'Must be a valid https:// URL'
+          : 'Must be a valid http:// or https:// URL',
     }),
 
     eventTypes: z

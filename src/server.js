@@ -1,7 +1,11 @@
+require("dotenv").config();
+
 const app = require('./app');
 const env = require('./config/env');
 const logger = require('./lib/logger');
 const prisma = require('./lib/prisma');
+
+
 
 const server = app.listen(env.PORT, () => {
   logger.info(`Server listening on port ${env.PORT}`);

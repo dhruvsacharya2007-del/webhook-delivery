@@ -1,3 +1,5 @@
+# Local dev infrastructure. For now just Postgres.
+# Redis, the app, the worker, and the example receiver join this file in later days.
 services:
   postgres:
     image: postgres:16-alpine
@@ -15,6 +17,27 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+  receiver:
+    image: node:22-alpine
+    container_name: webhook_receiver
+    working_dir: /app
+    volumes:
+      - ./receiver:/app:ro
+    command: node index.js
+    ports:
+      - "4000:4000"
+    environment:
+      PORT: 4000
+      # Paste the whsec_... returned by POST /endpoints here, then restart:
+      #   docker compose up -d --force-recreate receiver
+      WEBHOOK_SECRET: ${RECEIVER_SECRET:-}
+      FLAKY_FAILURES: 2
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:4000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
 volumes:
   webhook_pgdata:

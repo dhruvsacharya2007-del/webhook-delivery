@@ -53,6 +53,8 @@ async function sendSignedRequest({ url, secret, envelope, deliveryId, timeoutMs 
 
   const startedAt = Date.now();
 
+  console.log("POSTing to:", url);
+  
   try {
     const response = await fetch(url, {
       method: 'POST',
@@ -63,15 +65,12 @@ async function sendSignedRequest({ url, secret, envelope, deliveryId, timeoutMs 
         'User-Agent': 'webhook-delivery-service/1.0',
       },
       body: rawBody,
-      // Do NOT follow redirects. A subscriber could register a public https URL
-      // that 302s to an internal address (169.254.169.254, 10.0.0.0/8) — that
-      // is SSRF via redirect. This is defence layer 3 from endpoint.validator.
+      
       redirect: 'manual',
       signal: AbortSignal.timeout(timeoutMs),
     });
 
-    // fetch does NOT throw on 4xx/5xx — a 500 is a completed request. Reading
-    // the body also releases the socket back to the pool.
+    
     const text = await response.text().catch(() => '');
 
     return {
@@ -98,22 +97,20 @@ async function sendSignedRequest({ url, secret, envelope, deliveryId, timeoutMs 
   }
 }
 
-/**
- * Attempt one delivery: load it, sign it, send it, record what happened.
- *
- * Classifies the outcome but does NOT schedule retries — when to try again and
- * when to give up is policy, and policy is Day 4. This function reports facts.
- *
- * @param {string} deliveryId
- * @returns {Promise<{ outcome: string, statusCode: number|null, error: string|null, durationMs: number, attemptNumber: number }>}
- */
+
+
 async function attemptDelivery(deliveryId) {
   const delivery = await deliveryRepository.findByIdWithRelations(deliveryId);
 
   if (!delivery) {
     throw new Error(`Delivery not found: ${deliveryId}`);
   }
-
+  console.log({
+  deliveryId: delivery.id,
+  endpointUrl: delivery.endpoint.url,
+  endpointSecret: delivery.endpoint.signingSecret.slice(0, 12) + "...",
+  eventId: delivery.event.id,
+  });
   if (delivery.status === 'DELIVERED') {
     logger.warn({ deliveryId }, 'Delivery already succeeded, skipping');
     return { outcome: OUTCOME.SUCCESS, statusCode: null, error: null, durationMs: 0, attemptNumber: delivery.attemptCount };
@@ -152,8 +149,7 @@ async function attemptDelivery(deliveryId) {
       delivery.id,
       {
         attemptCount: attemptNumber,
-        // Only SUCCESS is decided here. RETRYABLE and TERMINAL transitions are
-        // Day 4/5 policy; the row stays PENDING until that logic exists.
+        
         ...(outcome === OUTCOME.SUCCESS ? { status: 'DELIVERED' } : {}),
       },
       tx,
