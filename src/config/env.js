@@ -14,6 +14,13 @@ const envSchema = z.object({
   // Long enough for a slow-but-alive receiver, short enough that one dead
   // endpoint cannot occupy a worker slot indefinitely.
   WEBHOOK_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
+
+  // Visibility timeout: how long a worker may hold a claimed delivery before
+  // we assume it died and make the row available again. 
+  VISIBILITY_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(60),
+
+  // How often each worker sweeps for stuck deliveries.
+  REAPER_INTERVAL_MS: z.coerce.number().int().positive().default(30000),
 });
 
 const parsed = envSchema.safeParse(process.env);

@@ -4,8 +4,7 @@ const logger = require('../lib/logger');
 const { sign } = require('../lib/signature');
 const deliveryRepository = require('../repositories/delivery.repository');
 
-// How much of the subscriber's response body we keep for debugging. Their
-// error page could be megabytes; we only need enough to diagnose.
+
 const MAX_STORED_RESPONSE_CHARS = 500;
 
 const OUTCOME = {
@@ -14,13 +13,7 @@ const OUTCOME = {
   TERMINAL: 'terminal',
 };
 
-/**
- * Build the request body sent to subscribers.
- *
- * An envelope, not the bare payload: `id` gives the subscriber a stable key for
- * their own idempotency (the consumer side of at-least-once), and `type` lets
- * them route without inspecting the data.
- */
+
 function buildEnvelope(event) {
   return {
     id: event.id,
@@ -35,7 +28,8 @@ function classifyStatus(statusCode) {
   if (statusCode >= 200 && statusCode < 300) return OUTCOME.SUCCESS;
   if (statusCode === 429 || statusCode === 408) return OUTCOME.RETRYABLE;
   if (statusCode >= 500) return OUTCOME.RETRYABLE;
-  
+  // 3xx lands here: we do not follow redirects (SSRF), so a redirect is a
+  // misconfigured endpoint, not a transient failure.
   return OUTCOME.TERMINAL;
 }
 
@@ -46,15 +40,12 @@ function classifyStatus(statusCode) {
  * @returns {{ statusCode: number|null, error: string|null, durationMs: number, responseBody: string|null }}
  */
 async function sendSignedRequest({ url, secret, envelope, deliveryId, timeoutMs }) {
-  // Serialize ONCE and sign exactly these bytes. Serializing twice risks
-  // signing different bytes than we send.
+  
   const rawBody = JSON.stringify(envelope);
   const { header } = sign({ rawBody, secret });
 
   const startedAt = Date.now();
 
-  console.log("POSTing to:", url);
-  
   try {
     const response = await fetch(url, {
       method: 'POST',
@@ -70,7 +61,6 @@ async function sendSignedRequest({ url, secret, envelope, deliveryId, timeoutMs 
       signal: AbortSignal.timeout(timeoutMs),
     });
 
-    
     const text = await response.text().catch(() => '');
 
     return {
@@ -98,19 +88,37 @@ async function sendSignedRequest({ url, secret, envelope, deliveryId, timeoutMs 
 }
 
 
+function buildStatusTransition(outcome) {
+  if (outcome === OUTCOME.SUCCESS) {
+    return { status: 'DELIVERED', claimedAt: null };
+  }
 
+  if (outcome === OUTCOME.TERMINAL) {
+    // A 400 or 401 will not fix itself; retrying is pure waste. Day 5 builds
+    // the dead-letter tooling around this state.
+    return { status: 'FAILED', claimedAt: null };
+  }
+
+  // RETRYABLE: make it eligible again immediately. Day 4 delays this.
+  return { status: 'PENDING', claimedAt: null, nextRetryAt: new Date() };
+}
+
+/**
+ * Attempt one delivery: load it, sign it, send it, record what happened.
+ *
+ * Classifies the outcome but does NOT schedule retries — when to try again and
+ * when to give up is policy, and policy is Day 4. This function reports facts.
+ *
+ * @param {string} deliveryId
+ * @returns {Promise<{ outcome: string, statusCode: number|null, error: string|null, durationMs: number, attemptNumber: number }>}
+ */
 async function attemptDelivery(deliveryId) {
   const delivery = await deliveryRepository.findByIdWithRelations(deliveryId);
 
   if (!delivery) {
     throw new Error(`Delivery not found: ${deliveryId}`);
   }
-  console.log({
-  deliveryId: delivery.id,
-  endpointUrl: delivery.endpoint.url,
-  endpointSecret: delivery.endpoint.signingSecret.slice(0, 12) + "...",
-  eventId: delivery.event.id,
-  });
+
   if (delivery.status === 'DELIVERED') {
     logger.warn({ deliveryId }, 'Delivery already succeeded, skipping');
     return { outcome: OUTCOME.SUCCESS, statusCode: null, error: null, durationMs: 0, attemptNumber: delivery.attemptCount };
@@ -149,8 +157,7 @@ async function attemptDelivery(deliveryId) {
       delivery.id,
       {
         attemptCount: attemptNumber,
-        
-        ...(outcome === OUTCOME.SUCCESS ? { status: 'DELIVERED' } : {}),
+        ...buildStatusTransition(outcome),
       },
       tx,
     );

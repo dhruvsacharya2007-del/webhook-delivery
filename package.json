@@ -10,7 +10,8 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:generate": "prisma generate",
     "prisma:studio": "prisma studio",
-    "deliver:once": "node --env-file-if-exists=.env scripts/deliverOnce.js"
+    "deliver:once": "node --env-file-if-exists=.env scripts/deliverOnce.js",
+    "worker": "node --env-file-if-exists=.env src/worker.js"
   },
   "license": "MIT",
   "dependencies": {

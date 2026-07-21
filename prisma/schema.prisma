@@ -50,6 +50,7 @@ model Delivery {
   status       DeliveryStatus @default(PENDING)
   attemptCount Int            @default(0)
   nextRetryAt  DateTime       @default(now())
+  claimedAt    DateTime?      // set when a worker claims it; drives the reaper
   createdAt    DateTime       @default(now())
   updatedAt    DateTime       @updatedAt
 
@@ -59,6 +60,7 @@ model Delivery {
 
   @@unique([eventId, endpointId])
   @@index([status, nextRetryAt])
+  @@index([status, claimedAt])
   @@map("deliveries")
 }
 
