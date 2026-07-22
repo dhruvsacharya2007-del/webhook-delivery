@@ -7,12 +7,16 @@ datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
-
 enum DeliveryStatus {
   PENDING
   DELIVERING
   DELIVERED
   FAILED
+}
+
+enum FailureReason {
+  RETRIES_EXHAUSTED
+  ENDPOINT_REJECTED
 }
 
 model Endpoint {
@@ -51,6 +55,7 @@ model Delivery {
   attemptCount Int            @default(0)
   nextRetryAt  DateTime       @default(now())
   claimedAt    DateTime?      // set when a worker claims it; drives the reaper
+  failureReason FailureReason? 
   createdAt    DateTime       @default(now())
   updatedAt    DateTime       @updatedAt
 

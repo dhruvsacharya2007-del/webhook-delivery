@@ -4,8 +4,9 @@ const logger = require('../lib/logger');
 const { sign } = require('../lib/signature');
 const { computeNextRetryAt, hasExhaustedRetries } = require('../lib/backoff');
 const deliveryRepository = require('../repositories/delivery.repository');
-
+const {encodeCursor , decodeCursor } = require('../validators/delivery.validator');
 const MAX_STORED_RESPONSE_CHARS = 500;
+const { AppError } = require('../middleware/errorHandler');
 
 const OUTCOME = {
   SUCCESS: 'success',
@@ -68,15 +69,10 @@ async function sendSignedRequest({ url, secret, envelope, deliveryId, timeoutMs 
       retryAfterHeader: response.headers.get('retry-after'),
     };
   } catch (err) {
-    // Network-level failure: DNS, connection refused, TLS, or our own abort.
-    // No HTTP response exists, so statusCode stays null — which is exactly why
-    // DeliveryAttempt.statusCode is nullable.
+    
     const isTimeout = err.name === 'TimeoutError' || err.name === 'AbortError';
 
-    // undici wraps network failures as a generic "TypeError: fetch failed" and
-    // puts the real reason (ECONNREFUSED, ENOTFOUND, CERT_HAS_EXPIRED) on
-    // err.cause. Without unwrapping it, every network failure logs identically
-    // and is undebuggable.
+    
     const cause = err.cause;
     const detail = cause?.code || cause?.message;
 
@@ -99,15 +95,17 @@ function buildStatusTransition({ outcome, attemptNumber, retryAfterHeader }) {
   }
 
   if (outcome === OUTCOME.TERMINAL) {
-    // A 400 or 401 will not fix itself; retrying is pure waste.
-    return { data: { status: 'FAILED', claimedAt: null }, scheduling: null };
+    // A 400 or 401 will not fix itself; retrying is pure waste. This reason is
+    // NOT redrivable — a human must fix the secret or the endpoint first.
+    return {
+      data: { status: 'FAILED', claimedAt: null, failureReason: 'ENDPOINT_REJECTED' },
+      scheduling: null,
+    };
   }
 
-  // RETRYABLE, but out of budget: dead-letter it. Day 5 builds the tooling to
-  // inspect and redrive rows in this state.
   if (hasExhaustedRetries(attemptNumber, env.MAX_DELIVERY_ATTEMPTS)) {
     return {
-      data: { status: 'FAILED', claimedAt: null },
+      data: { status: 'FAILED', claimedAt: null, failureReason: 'RETRIES_EXHAUSTED' },
       scheduling: { exhausted: true, maxAttempts: env.MAX_DELIVERY_ATTEMPTS },
     };
   }
@@ -221,10 +219,93 @@ async function attemptDelivery(deliveryId) {
   };
 }
 
+
+async function listFailedDeliveries({ endpointId, failureReason, cursor, limit }) {
+  const decoded = cursor ? decodeCursor(cursor) : null;
+ 
+  const rows = await deliveryRepository.listFailed({
+    endpointId,
+    failureReason,
+    cursorCreatedAt: decoded?.createdAt ?? null,
+    cursorId: decoded?.id ?? null,
+    limit: limit + 1, // one extra row reveals whether another page exists
+  });
+ 
+  const hasMore = rows.length > limit;
+  const visible = hasMore ? rows.slice(0, limit) : rows;
+ 
+  const last = visible[visible.length - 1];
+  const nextCursor = hasMore && last ? encodeCursor(last.createdAt, last.id) : null;
+ 
+  return {
+    data: visible.map((row) => ({
+      id: row.id,
+      eventId: row.eventId,
+      eventType: row.eventType,
+      endpointId: row.endpointId,
+      endpointUrl: row.endpointUrl,
+      status: row.status,
+      attemptCount: row.attemptCount,
+      
+      failureReason: row.failureReason ?? 'UNKNOWN',
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    })),
+    pagination: { nextCursor, hasMore },
+  };
+}
+ 
+ 
+async function redriveDelivery(id) {
+  const rows = await deliveryRepository.redriveOne(id);
+
+  if (rows.length > 0) {
+    logger.info({ deliveryId: id }, 'Delivery redriven');
+
+    return {
+      redriven: true,
+      id,
+    };
+  }
+
+  const delivery = await deliveryRepository.findById(id);
+
+  if (!delivery) {
+    throw new AppError(404, 'Delivery not found');
+  }
+
+  throw new AppError(
+    409,
+    'Delivery is not in the FAILED state and cannot be redriven',
+  );
+}
+
+async function deliveryExists(id) {
+  const delivery = await deliveryRepository.findByIdWithRelations(id);
+  return delivery !== null;
+}
+ 
+
+async function redriveEndpointFailures(endpointId) {
+  const rows = await deliveryRepository.redriveExhaustedForEndpoint(endpointId);
+  const deliveryIds = rows.map((r) => r.id);
+ 
+  logger.info(
+    { endpointId, redrivenCount: deliveryIds.length },
+    'Bulk redrive for endpoint',
+  );
+ 
+  return { redrivenCount: deliveryIds.length, deliveryIds };
+}
+ 
 module.exports = {
   attemptDelivery,
   sendSignedRequest,
   buildEnvelope,
   classifyStatus,
+  listFailedDeliveries,
+  redriveDelivery,
+  redriveEndpointFailures,
+  deliveryExists,
   OUTCOME,
 };

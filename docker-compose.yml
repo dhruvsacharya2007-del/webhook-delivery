@@ -1,5 +1,4 @@
-# Local dev infrastructure. For now just Postgres.
-# Redis, the app, the worker, and the example receiver join this file in later days.
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -18,9 +17,55 @@ services:
       timeout: 5s
       retries: 5
 
+  migrate:
+    build: .
+    container_name: webhook_migrate
+    command: npx prisma migrate deploy
+    environment:
+      DATABASE_URL: postgresql://webhook:webhook@postgres:5432/webhook_db?schema=public
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: .
+    container_name: webhook_api
+    command: node src/server.js
+    environment:
+      DATABASE_URL: postgresql://webhook:webhook@postgres:5432/webhook_db?schema=public
+      PORT: 3000
+      NODE_ENV: production
+      LOG_LEVEL: info
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build: .
+    command: node src/worker.js
+    environment:
+      DATABASE_URL: postgresql://webhook:webhook@postgres:5432/webhook_db?schema=public
+      NODE_ENV: production
+      LOG_LEVEL: info
+      WEBHOOK_TIMEOUT_MS: 10000
+      BACKOFF_BASE_MS: 5000
+      MAX_DELIVERY_ATTEMPTS: 6
+      VISIBILITY_TIMEOUT_SECONDS: 60
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    deploy:
+      replicas: 2
+
+
   receiver:
     image: node:22-alpine
-    container_name: webhook_receiver
     working_dir: /app
     volumes:
       - ./receiver:/app:ro
@@ -29,8 +74,6 @@ services:
       - "4000:4000"
     environment:
       PORT: 4000
-      # Paste the whsec_... returned by POST /endpoints here, then restart:
-      #   docker compose up -d --force-recreate receiver
       WEBHOOK_SECRET: ${RECEIVER_SECRET:-}
       FLAKY_FAILURES: 2
     healthcheck:

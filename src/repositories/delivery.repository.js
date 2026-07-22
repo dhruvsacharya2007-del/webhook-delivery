@@ -1,4 +1,5 @@
 const prisma = require('../lib/prisma');
+const { Prisma } = require('../generated/prisma');
 
 function createMany(deliveries, client = prisma) {
   return client.delivery.createMany({
@@ -39,7 +40,7 @@ function findNextDue(now = new Date(), client = prisma) {
   });
 }
 
-              
+
 
 function claimDeliveries(batchSize, client = prisma) {
   return client.$queryRaw`
@@ -73,6 +74,79 @@ function reapStuckDeliveries(visibilityTimeoutSeconds, client = prisma) {
     RETURNING id
   `;
 }
+
+
+
+
+function listFailed({ endpointId, failureReason, cursorCreatedAt, cursorId, limit }, client = prisma) {
+  // Parameterised via Prisma.sql fragments so optional filters compose safely.
+  const conditions = [Prisma.sql`d.status = 'FAILED'::"DeliveryStatus"`];
+ 
+  if (endpointId) {
+    conditions.push(Prisma.sql`d."endpointId" = ${endpointId}`);
+  }
+  if (failureReason) {
+    conditions.push(Prisma.sql`d."failureReason" = ${failureReason}::"FailureReason"`);
+  }
+  if (cursorCreatedAt && cursorId) {
+    conditions.push(
+      Prisma.sql`(d."createdAt", d.id) < (${cursorCreatedAt}, ${cursorId})`,
+    );
+  }
+ 
+  const where = Prisma.join(conditions, ' AND ');
+ 
+  return client.$queryRaw`
+    SELECT d.id, d."eventId", d."endpointId", d.status, d."attemptCount",
+           d."failureReason", d."createdAt", d."updatedAt",
+           e.url AS "endpointUrl", ev."eventType"
+    FROM deliveries d
+    JOIN endpoints e ON e.id = d."endpointId"
+    JOIN events ev ON ev.id = d."eventId"
+    WHERE ${where}
+    ORDER BY d."createdAt" DESC, d.id DESC
+    LIMIT ${limit}
+  `;
+}
+ 
+
+function redriveOne(id, client = prisma) {
+  return client.$queryRaw`
+    UPDATE deliveries
+    SET status = 'PENDING'::"DeliveryStatus",
+        "attemptCount" = 0,
+        "nextRetryAt" = NOW(),
+        "claimedAt" = NULL,
+        "failureReason" = NULL,
+        "updatedAt" = NOW()
+    WHERE id = ${id}
+      AND status = 'FAILED'::"DeliveryStatus"
+    RETURNING id
+  `;
+}
+ 
+
+function redriveExhaustedForEndpoint(endpointId, client = prisma) {
+  return client.$queryRaw`
+    UPDATE deliveries
+    SET status = 'PENDING'::"DeliveryStatus",
+        "attemptCount" = 0,
+        "nextRetryAt" = NOW(),
+        "claimedAt" = NULL,
+        "failureReason" = NULL,
+        "updatedAt" = NOW()
+    WHERE "endpointId" = ${endpointId}
+      AND status = 'FAILED'::"DeliveryStatus"
+      AND "failureReason" = 'RETRIES_EXHAUSTED'::"FailureReason"
+    RETURNING id
+  `;
+}
+
+function findById(id, client = prisma) {
+  return client.delivery.findUnique({
+    where: { id },
+  });
+}
  
 module.exports = {
   createMany,
@@ -81,7 +155,13 @@ module.exports = {
   findNextDue,
   claimDeliveries,
   reapStuckDeliveries,
+  listFailed,
+  redriveOne,
+  redriveExhaustedForEndpoint,
   updateStatus,
   recordAttempt,
+  findById
 };
+ 
+ 
  

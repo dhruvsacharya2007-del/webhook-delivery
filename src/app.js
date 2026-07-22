@@ -5,6 +5,7 @@ const prisma = require('./lib/prisma');
 const { errorHandler } = require('./middleware/errorHandler');
 const endpointRoutes = require('./routes/endpoint.routes');
 const eventRoutes = require('./routes/event.routes');
+const deliveryRoutes = require('./routes/delivery.routes');
 
 const app = express();
 
@@ -24,7 +25,8 @@ app.get('/health', async (req, res, next) => {
 // Feature routes. Mounted AFTER express.json() (they need a parsed body)
 // and BEFORE errorHandler (which must be last to catch what they throw).
 app.use('/endpoints', endpointRoutes);
-app.use('/events' ,  eventRoutes);
+app.use('/events', eventRoutes);
+app.use('/deliveries', deliveryRoutes);
 
 app.use(errorHandler);
 
