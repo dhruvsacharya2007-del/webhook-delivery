@@ -2,8 +2,8 @@ const prisma = require('../lib/prisma');
 const env = require('../config/env');
 const logger = require('../lib/logger');
 const { sign } = require('../lib/signature');
+const { computeNextRetryAt, hasExhaustedRetries } = require('../lib/backoff');
 const deliveryRepository = require('../repositories/delivery.repository');
-
 
 const MAX_STORED_RESPONSE_CHARS = 500;
 
@@ -23,22 +23,15 @@ function buildEnvelope(event) {
   };
 }
 
-
 function classifyStatus(statusCode) {
   if (statusCode >= 200 && statusCode < 300) return OUTCOME.SUCCESS;
   if (statusCode === 429 || statusCode === 408) return OUTCOME.RETRYABLE;
   if (statusCode >= 500) return OUTCOME.RETRYABLE;
-  // 3xx lands here: we do not follow redirects (SSRF), so a redirect is a
-  // misconfigured endpoint, not a transient failure.
+  
   return OUTCOME.TERMINAL;
 }
 
-/**
- * Perform one signed HTTP POST. No database access, no retry policy — just the
- * network call and what came back. Kept separate so it is testable on its own.
- *
- * @returns {{ statusCode: number|null, error: string|null, durationMs: number, responseBody: string|null }}
- */
+
 async function sendSignedRequest({ url, secret, envelope, deliveryId, timeoutMs }) {
   
   const rawBody = JSON.stringify(envelope);
@@ -56,11 +49,12 @@ async function sendSignedRequest({ url, secret, envelope, deliveryId, timeoutMs 
         'User-Agent': 'webhook-delivery-service/1.0',
       },
       body: rawBody,
-      
+    
       redirect: 'manual',
       signal: AbortSignal.timeout(timeoutMs),
     });
 
+  
     const text = await response.text().catch(() => '');
 
     return {
@@ -68,11 +62,21 @@ async function sendSignedRequest({ url, secret, envelope, deliveryId, timeoutMs 
       error: null,
       durationMs: Date.now() - startedAt,
       responseBody: text.slice(0, MAX_STORED_RESPONSE_CHARS) || null,
+      // A 429 usually carries Retry-After: the subscriber telling us exactly
+      // when to come back. Ignoring it means walking straight back into the
+      // same rate limit.
+      retryAfterHeader: response.headers.get('retry-after'),
     };
   } catch (err) {
-    
+    // Network-level failure: DNS, connection refused, TLS, or our own abort.
+    // No HTTP response exists, so statusCode stays null — which is exactly why
+    // DeliveryAttempt.statusCode is nullable.
     const isTimeout = err.name === 'TimeoutError' || err.name === 'AbortError';
 
+    // undici wraps network failures as a generic "TypeError: fetch failed" and
+    // puts the real reason (ECONNREFUSED, ENOTFOUND, CERT_HAS_EXPIRED) on
+    // err.cause. Without unwrapping it, every network failure logs identically
+    // and is undebuggable.
     const cause = err.cause;
     const detail = cause?.code || cause?.message;
 
@@ -83,35 +87,51 @@ async function sendSignedRequest({ url, secret, envelope, deliveryId, timeoutMs 
         : `${err.name}: ${err.message}${detail ? ` (${detail})` : ''}`,
       durationMs: Date.now() - startedAt,
       responseBody: null,
+      retryAfterHeader: null,
     };
   }
 }
 
 
-function buildStatusTransition(outcome) {
+function buildStatusTransition({ outcome, attemptNumber, retryAfterHeader }) {
   if (outcome === OUTCOME.SUCCESS) {
-    return { status: 'DELIVERED', claimedAt: null };
+    return { data: { status: 'DELIVERED', claimedAt: null }, scheduling: null };
   }
 
   if (outcome === OUTCOME.TERMINAL) {
-    // A 400 or 401 will not fix itself; retrying is pure waste. Day 5 builds
-    // the dead-letter tooling around this state.
-    return { status: 'FAILED', claimedAt: null };
+    // A 400 or 401 will not fix itself; retrying is pure waste.
+    return { data: { status: 'FAILED', claimedAt: null }, scheduling: null };
   }
 
-  // RETRYABLE: make it eligible again immediately. Day 4 delays this.
-  return { status: 'PENDING', claimedAt: null, nextRetryAt: new Date() };
+  // RETRYABLE, but out of budget: dead-letter it. Day 5 builds the tooling to
+  // inspect and redrive rows in this state.
+  if (hasExhaustedRetries(attemptNumber, env.MAX_DELIVERY_ATTEMPTS)) {
+    return {
+      data: { status: 'FAILED', claimedAt: null },
+      scheduling: { exhausted: true, maxAttempts: env.MAX_DELIVERY_ATTEMPTS },
+    };
+  }
+
+  const schedule = computeNextRetryAt({
+    attemptNumber,
+    baseMs: env.BACKOFF_BASE_MS,
+    factor: env.BACKOFF_FACTOR,
+    capMs: env.BACKOFF_CAP_MS,
+    retryAfterHeader,
+  });
+
+  return {
+    data: { status: 'PENDING', claimedAt: null, nextRetryAt: schedule.nextRetryAt },
+    scheduling: {
+      exhausted: false,
+      delayMs: schedule.delayMs,
+      nextRetryAt: schedule.nextRetryAt,
+      source: schedule.source,
+    },
+  };
 }
 
-/**
- * Attempt one delivery: load it, sign it, send it, record what happened.
- *
- * Classifies the outcome but does NOT schedule retries — when to try again and
- * when to give up is policy, and policy is Day 4. This function reports facts.
- *
- * @param {string} deliveryId
- * @returns {Promise<{ outcome: string, statusCode: number|null, error: string|null, durationMs: number, attemptNumber: number }>}
- */
+
 async function attemptDelivery(deliveryId) {
   const delivery = await deliveryRepository.findByIdWithRelations(deliveryId);
 
@@ -138,9 +158,13 @@ async function attemptDelivery(deliveryId) {
   const outcome =
     result.statusCode === null ? OUTCOME.RETRYABLE : classifyStatus(result.statusCode);
 
-  // Record the attempt and move the delivery's status together. Recording an
-  // attempt without updating the delivery (or vice versa) would leave the two
-  // disagreeing about what happened.
+  
+  const transition = buildStatusTransition({
+    outcome,
+    attemptNumber,
+    retryAfterHeader: result.retryAfterHeader,
+  });
+
   await prisma.$transaction(async (tx) => {
     await deliveryRepository.recordAttempt(
       {
@@ -157,7 +181,7 @@ async function attemptDelivery(deliveryId) {
       delivery.id,
       {
         attemptCount: attemptNumber,
-        ...buildStatusTransition(outcome),
+        ...transition.data,
       },
       tx,
     );
@@ -171,6 +195,17 @@ async function attemptDelivery(deliveryId) {
       statusCode: result.statusCode,
       durationMs: result.durationMs,
       error: result.error,
+      nextStatus: transition.data.status,
+      ...(transition.scheduling?.exhausted
+        ? { retriesExhausted: true, maxAttempts: transition.scheduling.maxAttempts }
+        : {}),
+      ...(transition.scheduling && !transition.scheduling.exhausted
+        ? {
+            retryInMs: transition.scheduling.delayMs,
+            nextRetryAt: transition.scheduling.nextRetryAt,
+            scheduleSource: transition.scheduling.source,
+          }
+        : {}),
     },
     'Delivery attempt finished',
   );
@@ -181,6 +216,8 @@ async function attemptDelivery(deliveryId) {
     error: result.error,
     durationMs: result.durationMs,
     attemptNumber,
+    nextStatus: transition.data.status,
+    scheduling: transition.scheduling,
   };
 }
 

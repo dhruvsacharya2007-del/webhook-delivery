@@ -1,7 +1,6 @@
 const { z } = require('zod');
 
-// Validate env at boot. If it's wrong, we crash immediately with a clear
-// message instead of failing mysteriously deep in a request later.
+
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().default(3000),
@@ -10,17 +9,19 @@ const envSchema = z.object({
     .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'])
     .default('info'),
 
-  // How long we wait for a subscriber to respond before aborting the request.
-  // Long enough for a slow-but-alive receiver, short enough that one dead
-  // endpoint cannot occupy a worker slot indefinitely.
   WEBHOOK_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
 
-  // Visibility timeout: how long a worker may hold a claimed delivery before
-  // we assume it died and make the row available again. 
+  
   VISIBILITY_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(60),
 
-  // How often each worker sweeps for stuck deliveries.
   REAPER_INTERVAL_MS: z.coerce.number().int().positive().default(30000),
+
+ 
+  BACKOFF_BASE_MS: z.coerce.number().int().positive().default(5000),
+  BACKOFF_FACTOR: z.coerce.number().positive().default(2),
+  BACKOFF_CAP_MS: z.coerce.number().int().positive().default(3600000),
+
+  MAX_DELIVERY_ATTEMPTS: z.coerce.number().int().positive().default(6),
 });
 
 const parsed = envSchema.safeParse(process.env);

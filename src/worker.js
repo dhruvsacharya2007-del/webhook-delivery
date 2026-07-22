@@ -127,7 +127,7 @@ async function loop() {
 
 
 async function shutdown(signal) {
-  if (!running) return; // second signal, already shutting down
+  if (!running) return; 
   running = false;
  
   logger.info({ signal }, 'Shutdown requested, finishing in-flight work');
@@ -136,8 +136,6 @@ async function shutdown(signal) {
   if (interruptSleep) interruptSleep();
   if (reaperTimer) clearInterval(reaperTimer);
  
-  // Hard deadline: if the in-flight batch hangs we exit anyway rather than
-  // waiting for SIGKILL, so shutdown stays predictable.
   const forceExit = setTimeout(() => {
     logger.warn('Graceful shutdown timed out, forcing exit');
     process.exit(1);

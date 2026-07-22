@@ -1,11 +1,7 @@
 const prisma = require('../lib/prisma');
 
 
-/**
- * Persist a new endpoint.
- * @param {{ url: string, eventTypes: string[], signingSecret: string }} data
- * @returns {Promise<object>} the created endpoint, including signingSecret
- */
+
 function create(data, client = prisma) {
   return client.endpoint.create({ data });
 }

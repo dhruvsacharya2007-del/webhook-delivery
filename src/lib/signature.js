@@ -16,12 +16,7 @@ function computeSignature({ rawBody, secret, timestamp }) {
     .digest('hex');
 }
 
-/**
- * Produce a signature header for an outgoing request.
- *
- * @returns {{ timestamp: number, signature: string, header: string }}
- *   header looks like: t=1737331200,v1=5257a869...
- */
+
 function sign({ rawBody, secret, timestamp = currentUnixSeconds() }) {
   const signature = computeSignature({ rawBody, secret, timestamp });
 
@@ -32,12 +27,7 @@ function sign({ rawBody, secret, timestamp = currentUnixSeconds() }) {
   };
 }
 
-/**
- * Parse `t=123,v1=abc,v2=def` into its parts.
- *
- * Collects every vN= entry rather than assuming one, so a subscriber written
- * today keeps working if we later emit multiple versions during a migration.
- */
+
 function parseSignatureHeader(header) {
   const result = { timestamp: null, signatures: [] };
 
@@ -102,8 +92,7 @@ function verify({
     return { valid: false, reason: 'invalid_timestamp' };
   }
 
-  // Replay defence. abs() rejects far-future timestamps too: those mean clock
-  // skew between sender and receiver, which is worth surfacing, not ignoring.
+  
   const skewSeconds = Math.abs(now - timestamp);
   if (skewSeconds > toleranceSeconds) {
     return { valid: false, reason: 'timestamp_out_of_tolerance', skewSeconds };
