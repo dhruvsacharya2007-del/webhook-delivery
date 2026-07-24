@@ -19,3 +19,5 @@ coverage/
 
 dist/
 build/
+
+fly-db-credentials.txt
