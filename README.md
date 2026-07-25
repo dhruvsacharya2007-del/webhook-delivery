@@ -1,3 +1,8 @@
+![CI](https://github.com/dhruvsacharya2007-del/webhook-delivery/actions/workflows/ci.yml/badge.svg)
+
+
+
+
 # Webhook Delivery Service
 
 Ingests events and delivers them to subscriber endpoints over signed HTTP, with
