@@ -1,0 +1,49 @@
+app = 'dhruv-webhook-service'
+primary_region = 'sin'
+kill_signal = 'SIGTERM'
+kill_timeout = '20s'
+
+[deploy]
+  release_command = 'npm run migrate:deploy'
+  strategy = 'rolling'
+
+[processes]
+  api = 'node src/server.js'
+  worker = 'node src/worker.js'
+
+[env]
+  NODE_ENV = 'production'
+  LOG_LEVEL = 'info'
+  PORT = '3000'
+  WEBHOOK_TIMEOUT_MS = '10000'
+  VISIBILITY_TIMEOUT_SECONDS = '60'
+  REAPER_INTERVAL_MS = '30000'
+  BACKOFF_BASE_MS = '5000'
+  BACKOFF_FACTOR = '2'
+  BACKOFF_CAP_MS = '3600000'
+  MAX_DELIVERY_ATTEMPTS = '6'
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_start_machines = true
+  auto_stop_machines = 'off'
+  min_machines_running = 1
+  processes = ['api']
+
+  [[http_service.checks]]
+    method = 'GET'
+    path = '/health'
+    interval = '15s'
+    timeout = '2s'
+    grace_period = '10s'
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '512mb'
+  processes = ['api']
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '512mb'
+  processes = ['worker']

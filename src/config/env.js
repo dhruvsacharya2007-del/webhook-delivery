@@ -22,6 +22,8 @@ const envSchema = z.object({
   BACKOFF_CAP_MS: z.coerce.number().int().positive().default(3600000),
 
   MAX_DELIVERY_ATTEMPTS: z.coerce.number().int().positive().default(6),
+
+  DB_CONNECTION_LIMIT: z.coerce.number().int().positive().default(2),
 });
 
 const parsed = envSchema.safeParse(process.env);
