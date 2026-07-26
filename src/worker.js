@@ -7,6 +7,31 @@ const deliveryRepository = require('./repositories/delivery.repository');
 const deliveryService = require('./services/delivery.service');
 
 
+metricsServer = http.createServer(async (req, res) => {
+  if (req.method !== 'GET' || req.url !== '/metrics') {
+    res.statusCode = 404;
+    res.end();
+    return;
+  }
+  try {
+    const body = await register.metrics();
+    res.setHeader('Content-Type', register.contentType);
+    res.end(body);
+  } catch (err) {
+    logger.error({ err }, 'Metrics endpoint failed');
+    res.statusCode = 500;
+    res.end('metrics collection failed');
+  }
+});
+
+  metricsServer.listen(env.METRICS_PORT, '0.0.0.0', () => {
+    logger.info(
+      { port: env.METRICS_PORT },
+      'Worker metrics server listening'
+    );
+  });
+}
+
 const BATCH_SIZE = 5;
 
 
@@ -101,6 +126,8 @@ async function loop() {
     },
     'Worker started',
   );
+
+  startMetricsServer();
  
   // Sweep once at boot: if THIS worker was the one that just died and got
   // restarted, its own stranded rows are waiting.
@@ -135,6 +162,7 @@ async function shutdown(signal) {
   // Break out of an idle sleep immediately rather than waiting it out.
   if (interruptSleep) interruptSleep();
   if (reaperTimer) clearInterval(reaperTimer);
+  if (metricsServer) metricsServer.close();
  
   const forceExit = setTimeout(() => {
     logger.warn('Graceful shutdown timed out, forcing exit');

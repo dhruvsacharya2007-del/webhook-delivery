@@ -7,6 +7,7 @@ const deliveryRepository = require('../repositories/delivery.repository');
 const {encodeCursor , decodeCursor } = require('../validators/delivery.validator');
 const MAX_STORED_RESPONSE_CHARS = 500;
 const { AppError } = require('../middleware/errorHandler');
+const { deliveriesTotal } = require('../lib/metrics');
 
 const OUTCOME = {
   SUCCESS: 'success',
@@ -153,9 +154,14 @@ async function attemptDelivery(deliveryId) {
     timeoutMs: env.WEBHOOK_TIMEOUT_MS,
   });
 
+  
   const outcome =
-    result.statusCode === null ? OUTCOME.RETRYABLE : classifyStatus(result.statusCode);
+  result.statusCode === null ? OUTCOME.RETRYABLE : classifyStatus(result.statusCode);
 
+  
+  deliveriesTotal.inc({ outcome });
+
+ 
   
   const transition = buildStatusTransition({
     outcome,

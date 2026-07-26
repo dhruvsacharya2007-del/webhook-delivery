@@ -24,6 +24,8 @@ const envSchema = z.object({
   MAX_DELIVERY_ATTEMPTS: z.coerce.number().int().positive().default(6),
 
   DB_CONNECTION_LIMIT: z.coerce.number().int().positive().default(2),
+  
+  METRICS_PORT: z.coerce.number().int().positive().default(9091),
 });
 
 const parsed = envSchema.safeParse(process.env);
