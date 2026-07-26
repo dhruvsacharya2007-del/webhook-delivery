@@ -5,30 +5,23 @@ const logger = require('./lib/logger');
 const prisma = require('./lib/prisma');
 const deliveryRepository = require('./repositories/delivery.repository');
 const deliveryService = require('./services/delivery.service');
+const http = require('node:http');
+const { register } = require('./lib/metrics');
 
+let metricsServer = null;
 
-metricsServer = http.createServer(async (req, res) => {
-  if (req.method !== 'GET' || req.url !== '/metrics') {
-    res.statusCode = 404;
-    res.end();
-    return;
-  }
-  try {
-    const body = await register.metrics();
-    res.setHeader('Content-Type', register.contentType);
-    res.end(body);
-  } catch (err) {
-    logger.error({ err }, 'Metrics endpoint failed');
-    res.statusCode = 500;
-    res.end('metrics collection failed');
-  }
-});
-
+function startMetricsServer() {
+  metricsServer = http.createServer(async (req, res) => {
+    if (req.method === 'GET' && req.url === '/metrics') {
+      res.setHeader('Content-Type', register.contentType);
+      res.end(await register.metrics());
+    } else {
+      res.statusCode = 404;
+      res.end();
+    }
+  });
   metricsServer.listen(env.METRICS_PORT, '0.0.0.0', () => {
-    logger.info(
-      { port: env.METRICS_PORT },
-      'Worker metrics server listening'
-    );
+    logger.info({ port: env.METRICS_PORT }, 'Worker metrics server listening');
   });
 }
 

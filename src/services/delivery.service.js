@@ -7,7 +7,7 @@ const deliveryRepository = require('../repositories/delivery.repository');
 const {encodeCursor , decodeCursor } = require('../validators/delivery.validator');
 const MAX_STORED_RESPONSE_CHARS = 500;
 const { AppError } = require('../middleware/errorHandler');
-const { deliveriesTotal } = require('../lib/metrics');
+const { deliveriesTotal, deliveryDuration } = require('../lib/metrics');
 
 const OUTCOME = {
   SUCCESS: 'success',
@@ -160,7 +160,7 @@ async function attemptDelivery(deliveryId) {
 
   
   deliveriesTotal.inc({ outcome });
-
+  deliveryDuration.observe({ outcome }, result.durationMs / 1000);
  
   
   const transition = buildStatusTransition({
