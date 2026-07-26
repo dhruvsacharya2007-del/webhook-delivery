@@ -6,24 +6,13 @@ const prisma = require('./lib/prisma');
 const deliveryRepository = require('./repositories/delivery.repository');
 const deliveryService = require('./services/delivery.service');
 const http = require('node:http');
-const { register } = require('./lib/metrics');
+const { startMetricsServer, workerActiveJobs, workerPollCycles } = require('./lib/metrics');
+
+
+
 
 let metricsServer = null;
 
-function startMetricsServer() {
-  metricsServer = http.createServer(async (req, res) => {
-    if (req.method === 'GET' && req.url === '/metrics') {
-      res.setHeader('Content-Type', register.contentType);
-      res.end(await register.metrics());
-    } else {
-      res.statusCode = 404;
-      res.end();
-    }
-  });
-  metricsServer.listen(env.METRICS_PORT, '0.0.0.0', () => {
-    logger.info({ port: env.METRICS_PORT }, 'Worker metrics server listening');
-  });
-}
 
 const BATCH_SIZE = 5;
 
@@ -64,7 +53,12 @@ async function processBatch() {
   // abandons the rest — their outcomes would never be recorded and their rows
   // would stay stuck in DELIVERING. allSettled waits for every one.
   const results = await Promise.allSettled(
-    claimed.map(({ id }) => deliveryService.attemptDelivery(id)),
+      claimed.map(({ id }) => {
+      workerActiveJobs.inc();
+      return deliveryService
+      .attemptDelivery(id)
+      .finally(() => workerActiveJobs.dec());
+    })
   );
 
   for (const [index, result] of results.entries()) {
@@ -120,7 +114,7 @@ async function loop() {
     'Worker started',
   );
 
-  startMetricsServer();
+  metricsServer = startMetricsServer(env.METRICS_PORT, logger);
  
   // Sweep once at boot: if THIS worker was the one that just died and got
   // restarted, its own stranded rows are waiting.
@@ -128,6 +122,7 @@ async function loop() {
   reaperTimer = setInterval(runReaper, env.REAPER_INTERVAL_MS);
  
   while (running) {
+    workerPollCycles.inc();
     try {
       currentBatch = processBatch();
       const processed = await currentBatch;

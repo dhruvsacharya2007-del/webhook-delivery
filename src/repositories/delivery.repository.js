@@ -147,6 +147,16 @@ function findById(id, client = prisma) {
     where: { id },
   });
 }
+
+function getBacklogCounts(client = prisma) {
+  return client.$queryRaw`
+    SELECT
+      count(*) FILTER (WHERE "nextRetryAt" <= NOW()) AS claimable,
+      count(*) FILTER (WHERE "nextRetryAt" >  NOW()) AS scheduled
+    FROM deliveries
+    WHERE status = 'PENDING'::"DeliveryStatus"
+  `;
+}
  
 module.exports = {
   createMany,
@@ -160,7 +170,8 @@ module.exports = {
   redriveExhaustedForEndpoint,
   updateStatus,
   recordAttempt,
-  findById
+  findById,
+  getBacklogCounts
 };
  
  

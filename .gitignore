@@ -10,8 +10,8 @@ npm-debug.log*
 
 coverage/
 
-.DS_Store
 
+.DS_Store
 .vscode/
 .idea/
 
