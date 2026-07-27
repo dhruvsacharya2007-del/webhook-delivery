@@ -26,30 +26,28 @@ function isIdempotencyKeyViolation(err) {
  * @param {{ eventType: string, payload: object, idempotencyKey: string }} input
  * @returns {Promise<{ event: object, deliveryCount: number, isDuplicate: boolean }>}
  */
-async function createEvent({ eventType, payload, idempotencyKey }) {
+async function createEvent({ eventType, payload, idempotencyKey, correlationId }) {
   const requestFingerprint = generateRequestFingerprint({ eventType, payload });
-
   try {
-    
     return await prisma.$transaction(async (tx) => {
-     
       const event = await eventRepository.create(
-        { eventType, payload, idempotencyKey, requestFingerprint },
+        { eventType, payload, idempotencyKey, requestFingerprint, correlationId },
         tx,
       );
-
       const endpoints = await endpointRepository.findEnabledForEventType(eventType, tx);
 
-      
       let deliveryCount = 0;
       if (endpoints.length > 0) {
         const { count } = await deliveryRepository.createMany(
-          endpoints.map((endpoint) => ({ eventId: event.id, endpointId: endpoint.id })),
+          endpoints.map((endpoint) => ({
+            eventId: event.id,
+            endpointId: endpoint.id,
+            correlationId,              // copy onto every delivery, same txn
+          })),
           tx,
         );
         deliveryCount = count;
       }
-
       return { event, deliveryCount, isDuplicate: false };
     });
   } catch (err) {
@@ -57,6 +55,7 @@ async function createEvent({ eventType, payload, idempotencyKey }) {
     return handleDuplicateIngest({ idempotencyKey, requestFingerprint });
   }
 }
+
 
 
 async function handleDuplicateIngest({ idempotencyKey, requestFingerprint }) {

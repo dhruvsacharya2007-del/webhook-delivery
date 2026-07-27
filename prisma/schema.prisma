@@ -40,6 +40,7 @@ model Event {
   payload            Json
   idempotencyKey     String   @unique
   requestFingerprint String
+  correlationId      String?
   createdAt          DateTime @default(now())
 
   deliveries Delivery[]
@@ -47,7 +48,6 @@ model Event {
   @@index([eventType])
   @@map("events")
 }
-
 model Delivery {
   id           String         @id @default(uuid())
   eventId      String
@@ -55,8 +55,9 @@ model Delivery {
   status       DeliveryStatus @default(PENDING)
   attemptCount Int            @default(0)
   nextRetryAt  DateTime       @default(now())
-  claimedAt    DateTime?      // set when a worker claims it; drives the reaper
-  failureReason FailureReason? 
+  claimedAt    DateTime?
+  failureReason FailureReason?
+  correlationId String?
   createdAt    DateTime       @default(now())
   updatedAt    DateTime       @updatedAt
 

@@ -138,12 +138,22 @@ async function attemptDelivery(deliveryId) {
     throw new Error(`Delivery not found: ${deliveryId}`);
   }
 
+  
+  return logger.correlationStore.run({ correlationId: delivery.correlationId }, () =>
+    processAttempt(delivery, deliveryId),
+  );
+}
+
+// The actual attempt work — runs inside the correlation context, so every log
+// line here (and in sendSignedRequest, the transaction, etc.) carries correlationId.
+async function processAttempt(delivery, deliveryId) {
   if (delivery.status === 'DELIVERED') {
     logger.warn({ deliveryId }, 'Delivery already succeeded, skipping');
     return { outcome: OUTCOME.SUCCESS, statusCode: null, error: null, durationMs: 0, attemptNumber: delivery.attemptCount };
   }
 
   const attemptNumber = delivery.attemptCount + 1;
+  
   const envelope = buildEnvelope(delivery.event);
 
   const result = await sendSignedRequest({
