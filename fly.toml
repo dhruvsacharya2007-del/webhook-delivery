@@ -47,3 +47,13 @@ kill_timeout = '20s'
   size = 'shared-cpu-1x'
   memory = '512mb'
   processes = ['worker']
+
+  [[metrics]]
+  port = 9091
+  path = "/metrics"
+  processes = ["api"]
+
+[[metrics]]
+  port = 9091
+  path = "/metrics"
+  processes = ["worker"]
