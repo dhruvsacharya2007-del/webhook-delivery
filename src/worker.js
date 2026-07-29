@@ -14,11 +14,10 @@ const { startMetricsServer, workerActiveJobs, workerPollCycles } = require('./li
 let metricsServer = null;
 
 
-const BATCH_SIZE = 5;
 
+const BATCH_SIZE = env.WORKER_BATCH_SIZE;
 
-const IDLE_POLL_MS = 1000;
-
+const IDLE_POLL_MS = env.WORKER_IDLE_POLL_MS;
 
 const ERROR_BACKOFF_MS = 5000;
 
@@ -147,7 +146,7 @@ async function shutdown(signal) {
  
   logger.info({ signal }, 'Shutdown requested, finishing in-flight work');
  
-  // Break out of an idle sleep immediately rather than waiting it out.
+  
   if (interruptSleep) interruptSleep();
   if (reaperTimer) clearInterval(reaperTimer);
   if (metricsServer) metricsServer.close();

@@ -7,7 +7,7 @@ const envSchema = z.object({
   DATABASE_URL: z.string().url(),
   LOG_LEVEL: z
     .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'])
-    .default('info'),
+    .default('warn'),
 
   WEBHOOK_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
 
@@ -20,11 +20,13 @@ const envSchema = z.object({
   BACKOFF_BASE_MS: z.coerce.number().int().positive().default(5000),
   BACKOFF_FACTOR: z.coerce.number().positive().default(2),
   BACKOFF_CAP_MS: z.coerce.number().int().positive().default(3600000),
+  WORKER_BATCH_SIZE: z.coerce.number().int().positive().default(5),
+  WORKER_IDLE_POLL_MS: z.coerce.number().int().positive().default(1000),  
 
   MAX_DELIVERY_ATTEMPTS: z.coerce.number().int().positive().default(6),
 
   DB_CONNECTION_LIMIT: z.coerce.number().int().positive().default(2),
-  
+
   METRICS_PORT: z.coerce.number().int().positive().default(9091),
 });
 
