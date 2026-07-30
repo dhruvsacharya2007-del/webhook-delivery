@@ -37,44 +37,34 @@ function sleep(ms) {
   });
 }
 
-/**
- * Claim a batch and deliver all of it concurrently.
- * @returns {Promise<number>} how many deliveries were claimed
- */
 async function processBatch() {
   const claimed = await deliveryRepository.claimDeliveries(BATCH_SIZE);
-
   if (claimed.length === 0) return 0;
-
   logger.debug({ count: claimed.length }, 'Claimed deliveries');
 
-  // allSettled, NOT all. Promise.all rejects as soon as one promise rejects and
-  // abandons the rest — their outcomes would never be recorded and their rows
-  // would stay stuck in DELIVERING. allSettled waits for every one.
   const results = await Promise.allSettled(
-      claimed.map(({ id }) => {
+    claimed.map(({ id }) => {
       workerActiveJobs.inc();
-      return deliveryService
-      .attemptDelivery(id)
-      .finally(() => workerActiveJobs.dec());
+      return deliveryService.attemptDelivery(id).finally(() => workerActiveJobs.dec());
     })
   );
 
+  const writes = [];
   for (const [index, result] of results.entries()) {
     if (result.status === 'rejected') {
-      // attemptDelivery handles HTTP failures internally, so a rejection here
-      // means something lower-level broke (database, missing row).
-      logger.error(
-        { deliveryId: claimed[index].id, err: result.reason },
-        'Delivery attempt threw',
-      );
+      logger.error({ deliveryId: claimed[index].id, err: result.reason }, 'Delivery attempt threw');
+      continue;
     }
+    if (result.value.skip) continue;
+    writes.push(result.value);
+  }
+
+  if (writes.length > 0) {
+    await deliveryRepository.applyBatchWrites(writes);
   }
 
   return claimed.length;
 }
-
- 
 
 async function runReaper() {
   try {

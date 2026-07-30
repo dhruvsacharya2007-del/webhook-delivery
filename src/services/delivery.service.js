@@ -1,4 +1,4 @@
-const prisma = require('../lib/prisma');
+
 const env = require('../config/env');
 const logger = require('../lib/logger');
 const { sign } = require('../lib/signature');
@@ -144,18 +144,14 @@ async function attemptDelivery(deliveryId) {
   );
 }
 
-// The actual attempt work — runs inside the correlation context, so every log
-// line here (and in sendSignedRequest, the transaction, etc.) carries correlationId.
 async function processAttempt(delivery, deliveryId) {
   if (delivery.status === 'DELIVERED') {
     logger.warn({ deliveryId }, 'Delivery already succeeded, skipping');
-    return { outcome: OUTCOME.SUCCESS, statusCode: null, error: null, durationMs: 0, attemptNumber: delivery.attemptCount };
+    return { skip: true, outcome: OUTCOME.SUCCESS };   
   }
 
   const attemptNumber = delivery.attemptCount + 1;
-  
   const envelope = buildEnvelope(delivery.event);
-
   const result = await sendSignedRequest({
     url: delivery.endpoint.url,
     secret: delivery.endpoint.signingSecret,
@@ -164,76 +160,40 @@ async function processAttempt(delivery, deliveryId) {
     timeoutMs: env.WEBHOOK_TIMEOUT_MS,
   });
 
-  
   const outcome =
-  result.statusCode === null ? OUTCOME.RETRYABLE : classifyStatus(result.statusCode);
+    result.statusCode === null ? OUTCOME.RETRYABLE : classifyStatus(result.statusCode);
 
-  
-  deliveriesTotal.inc({ outcome });
-  deliveryDuration.observe({ outcome }, result.durationMs / 1000);
- 
-  
-  const transition = buildStatusTransition({
-    outcome,
-    attemptNumber,
-    retryAfterHeader: result.retryAfterHeader,
-  });
+  deliveriesTotal.inc({ outcome });                       
+  deliveryDuration.observe({ outcome }, result.durationMs / 1000);  
 
-  await prisma.$transaction(async (tx) => {
-    await deliveryRepository.recordAttempt(
-      {
-        deliveryId: delivery.id,
-        attemptNumber,
-        statusCode: result.statusCode,
-        error: result.error ?? (outcome === OUTCOME.SUCCESS ? null : `HTTP ${result.statusCode}`),
-        durationMs: result.durationMs,
-      },
-      tx,
-    );
+  const transition = buildStatusTransition({ outcome, attemptNumber, retryAfterHeader: result.retryAfterHeader });
 
-    await deliveryRepository.updateStatus(
-      delivery.id,
-      {
-        attemptCount: attemptNumber,
-        ...transition.data,
-      },
-      tx,
-    );
-  });
-
+  // Per-delivery logging stays here (per-delivery fact, correct correlationId in scope)
   logger[outcome === OUTCOME.SUCCESS ? 'info' : 'warn'](
-    {
-      deliveryId,
-      attemptNumber,
-      outcome,
-      statusCode: result.statusCode,
-      durationMs: result.durationMs,
-      error: result.error,
-      nextStatus: transition.data.status,
-      ...(transition.scheduling?.exhausted
-        ? { retriesExhausted: true, maxAttempts: transition.scheduling.maxAttempts }
-        : {}),
-      ...(transition.scheduling && !transition.scheduling.exhausted
-        ? {
-            retryInMs: transition.scheduling.delayMs,
-            nextRetryAt: transition.scheduling.nextRetryAt,
-            scheduleSource: transition.scheduling.source,
-          }
-        : {}),
-    },
+    { deliveryId, attemptNumber, outcome, statusCode: result.statusCode, durationMs: result.durationMs,
+      error: result.error, nextStatus: transition.data.status,},
     'Delivery attempt finished',
   );
 
+  
   return {
+    skip: false,
     outcome,
-    statusCode: result.statusCode,
-    error: result.error,
-    durationMs: result.durationMs,
-    attemptNumber,
-    nextStatus: transition.data.status,
-    scheduling: transition.scheduling,
+    attemptRow: {
+      deliveryId: delivery.id,
+      attemptNumber,
+      statusCode: result.statusCode,
+      error: result.error ?? (outcome === OUTCOME.SUCCESS ? null : `HTTP ${result.statusCode}`),
+      durationMs: result.durationMs,
+    },
+    statusUpdate: {
+      id: delivery.id,
+      data: { attemptCount: attemptNumber, ...transition.data },
+    },
   };
 }
+
+
 
 
 async function listFailedDeliveries({ endpointId, failureReason, cursor, limit }) {

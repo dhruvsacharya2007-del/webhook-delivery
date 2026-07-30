@@ -157,7 +157,24 @@ function getBacklogCounts(client = prisma) {
     WHERE status = 'PENDING'::"DeliveryStatus"
   `;
 }
- 
+function applyBatchWrites(writes, client = prisma) {
+  return client.$transaction(async (tx) => {
+    await tx.deliveryAttempt.createMany({ data: writes.map((w) => w.attemptRow) });
+    /*
+    prisma does something like 
+    INSERT INTO DeliveryAttempt
+    (deliveryId, attemptNumber, statusCode, error, durationMs)
+
+    VALUES
+    ('D1',1,200,NULL,150),
+    ('D2',1,500,'HTTP 500',220),
+    ('D3',2,NULL,'timeout after 10000ms',10000);
+    */
+    for (const w of writes) {
+      await tx.delivery.update({ where: { id: w.statusUpdate.id }, data: w.statusUpdate.data });
+    }
+  });
+}
 module.exports = {
   createMany,
   countByEventId,
@@ -171,7 +188,8 @@ module.exports = {
   updateStatus,
   recordAttempt,
   findById,
-  getBacklogCounts
+  getBacklogCounts,
+  applyBatchWrites
 };
  
  

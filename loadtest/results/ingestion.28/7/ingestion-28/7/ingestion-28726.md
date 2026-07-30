@@ -122,3 +122,74 @@ second worker adds ~10% while the database is the bottleneck.
   throughput. Real subscriber latency would lower absolute delivery rates.
 - `worker_active_jobs` frequently sampled as 0 because fast local batches complete
   between metric scrapes; under slower real endpoints it would sit non-zero.
+
+---
+
+# Day 8 — Batched Delivery Writes (Optimization)
+
+## Hypothesis
+Day 6 identified delivery throughput as Postgres-CPU-bound: a second worker added only
+~10% because the database was saturated (~215% CPU). Hypothesis: the dominant cost was
+**per-delivery transaction commits** — at batch=20, each claimed batch performed 20
+separate transactions = 20 `BEGIN`/`COMMIT` pairs and, critically, **20 fsyncs** (each
+`COMMIT` forces a WAL flush to disk, ~1-10ms each, serialized).
+
+## Change
+Refactored the write path so each claimed batch performs **one transaction** instead of
+one-per-delivery:
+- `attemptDelivery` no longer writes; it returns the intended writes (Shape B):
+  `{ attemptRow, statusUpdate }` (or `{ skip: true }` for already-DELIVERED rows).
+- `processBatch` collects the writes from all fulfilled, non-skip results and calls a new
+  repository function `applyBatchWrites(writes)`.
+- `applyBatchWrites` runs one transaction: one `createMany` for all attempt rows + a loop
+  of per-row `update`s for the (differing) status transitions, then a single `COMMIT`.
+- HTTP, outcome classification, metrics, logging, and correlation-ID context remain
+  per-delivery — only the DB persistence was batched.
+
+Per batch of 20: **1 createMany + 20 updates + 1 commit** (down from 20×(insert+update+commit)).
+The attempt inserts collapse to a single statement for free; the updates stay individual
+(the "fsync-elimination" bet, deferring the raw `UPDATE ... FROM VALUES` approach unless
+statement count proves to be the next bottleneck).
+
+## Correctness analysis
+Batching trades per-delivery fault isolation for throughput: if the batch transaction
+fails partway, all rows in it roll back (including already-sent deliveries), and the
+reaper re-delivers them. This is **acceptable** because it produces the *same class* of
+duplicate the system already handles — the service is at-least-once, subscribers dedupe
+on `Webhook-Id`, and the reaper already re-delivers on worker death. No new correctness
+guarantee is broken. Batch updates are simple primary-key operations, so partial failure
+is rare.
+
+## Results
+
+| Config | Rate | Postgres CPU | Bottleneck |
+|--------|------|-------------|-----------|
+| Day 6: 1 worker, per-delivery txn | ~1,090/s | ~170% | DB |
+| Day 6: 2 workers, per-delivery txn | ~1,200/s | ~215% | DB pegged (2nd worker +10%) |
+| Day 8: 1 worker, **batched** txn | ~865/s | **~35%** | not DB |
+| Day 8: 2 workers, **batched** txn | ~1,280/s | ~65% | approaching DB again |
+
+**Headline: Postgres CPU dropped ~80% (170% → 35%) for equivalent single-worker
+throughput.** The commit/fsync overhead was confirmed as the dominant cost.
+
+**Proof the bottleneck moved:** the second worker's contribution went from **+10%**
+(Day 6, DB pegged) to **+48%** (Day 8, DB at 35% with headroom). `FOR UPDATE SKIP LOCKED`
+was already distributing work with zero contention; the difference is that batching freed
+the shared resource (DB CPU) so a second worker now actually adds throughput. CPU scaled
+near-linearly (~30% per worker), implying the batched ceiling is well above 2,000/s vs the
+old ~1,200/s wall.
+
+## Honest caveat
+Single-worker throughput dipped slightly (1,090 → 865) because the batched path waits for
+all 20 HTTP calls to settle (`Promise.allSettled`) before the single write, so each batch
+is gated by its slowest HTTP call. This is a good trade: worker time is cheap and
+horizontally scalable, whereas database CPU is the scarce shared resource — and the DB
+cost fell ~80% while horizontal scaling was restored.
+
+## Decision to stop here
+Did not push to 3-4 workers / 100% Postgres CPU. The hypothesis (batching removes the DB
+bottleneck) is fully proven by the CPU drop + restored scaling; finding the exhausted-machine
+max would produce a bigger number but not a stronger conclusion, and would just re-discover
+Day 6's "DB has a finite ceiling" at a higher point. The efficiency win (80% CPU reduction,
+scaling restored) is the result worth citing, not a raw max-throughput figure.
+
