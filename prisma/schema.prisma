@@ -26,6 +26,7 @@ model Endpoint {
   signingSecret String
   eventTypes    String[]
   enabled       Boolean  @default(true)
+  deliverySequence Int   @default(0)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -49,6 +50,7 @@ model Event {
   @@map("events")
 }
 model Delivery {
+  endpointSeq   Int? 
   id           String         @id @default(uuid())
   eventId      String
   endpointId   String
@@ -67,6 +69,7 @@ model Delivery {
 
   @@unique([eventId, endpointId])
   @@index([status, nextRetryAt])
+  @@index([status, endpointSeq, nextRetryAt])
   @@index([status, claimedAt])
   @@map("deliveries")
 }

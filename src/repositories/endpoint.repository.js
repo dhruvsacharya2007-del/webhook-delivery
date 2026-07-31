@@ -19,8 +19,17 @@ function findEnabledForEventType(eventType, client = prisma) {
     },
   });
 }
+function incrementDeliverySequence(endpointId, client = prisma) {
+  return client.endpoint.update({
+    where: { id: endpointId },
+    data: { deliverySequence: { increment: 1 } },
+    select: { deliverySequence: true },
+  });
+}
+
 
 module.exports = {
   create,
   findEnabledForEventType,
+  incrementDeliverySequence,
 };

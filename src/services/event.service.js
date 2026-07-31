@@ -20,12 +20,6 @@ function isIdempotencyKeyViolation(err) {
     : String(target).includes('idempotencyKey');
 }
 
-/**
- * Ingest an event idempotently and fan it out to subscribed endpoints.
- *
- * @param {{ eventType: string, payload: object, idempotencyKey: string }} input
- * @returns {Promise<{ event: object, deliveryCount: number, isDuplicate: boolean }>}
- */
 async function createEvent({ eventType, payload, idempotencyKey, correlationId }) {
   const requestFingerprint = generateRequestFingerprint({ eventType, payload });
   try {
@@ -38,14 +32,21 @@ async function createEvent({ eventType, payload, idempotencyKey, correlationId }
 
       let deliveryCount = 0;
       if (endpoints.length > 0) {
-        const { count } = await deliveryRepository.createMany(
-          endpoints.map((endpoint) => ({
+        
+        const deliveryRows = [];
+        for (const endpoint of endpoints) {
+          const { deliverySequence } = await endpointRepository.incrementDeliverySequence(
+            endpoint.id,
+            tx,
+          );
+          deliveryRows.push({
             eventId: event.id,
             endpointId: endpoint.id,
-            correlationId,              // copy onto every delivery, same txn
-          })),
-          tx,
-        );
+            correlationId,
+            endpointSeq: deliverySequence,
+          });
+        }
+        const { count } = await deliveryRepository.createMany(deliveryRows, tx);
         deliveryCount = count;
       }
       return { event, deliveryCount, isDuplicate: false };

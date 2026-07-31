@@ -52,7 +52,7 @@ function claimDeliveries(batchSize, client = prisma) {
       SELECT id FROM deliveries
       WHERE status = 'PENDING'::"DeliveryStatus"
         AND "nextRetryAt" <= NOW()
-      ORDER BY "nextRetryAt" ASC
+      ORDER BY "endpointSeq" ASC NULLS LAST, "nextRetryAt" ASC
       LIMIT ${batchSize}
       FOR UPDATE SKIP LOCKED
     )
