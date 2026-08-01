@@ -9,6 +9,14 @@ const MAX_STORED_RESPONSE_CHARS = 500;
 const { AppError } = require('../middleware/errorHandler');
 const { deliveriesTotal, deliveryDuration } = require('../lib/metrics');
 
+const net = require('node:net');
+
+const http = require('node:http');
+const https = require('node:https');
+
+
+const { ssrfSafeLookup, SsrfError , isBlockedIp } = require('../lib/ssrf');
+
 const OUTCOME = {
   SUCCESS: 'success',
   RETRYABLE: 'retryable',
@@ -34,59 +42,102 @@ function classifyStatus(statusCode) {
 }
 
 
-async function sendSignedRequest({ url, secret, envelope, deliveryId, timeoutMs }) {
-  
+
+function sendSignedRequest({ url, secret, envelope, deliveryId, timeoutMs }) {
   const rawBody = JSON.stringify(envelope);
   const { header } = sign({ rawBody, secret });
-
   const startedAt = Date.now();
 
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Webhook-Signature': header,
-        'Webhook-Id': deliveryId,
-        'User-Agent': 'webhook-delivery-service/1.0',
+  return new Promise((resolve) => {
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return resolve(fail('InvalidURL: malformed url', startedAt, true));
+    }
+
+    const isHttps = parsed.protocol === 'https:';
+    const isHttp = parsed.protocol === 'http:';
+    if (!isHttps && !(isHttp && env.ALLOW_HTTP_WEBHOOKS === true)) {
+      return resolve(fail(`BlockedScheme: ${parsed.protocol} not allowed`, startedAt, true));
+    }
+
+    if (net.isIP(parsed.hostname) && isBlockedIp(parsed.hostname, { allowLoopback: env.SSRF_ALLOW_LOOPBACK === true })) {
+      return resolve(fail(`SSRF blocked: ${parsed.hostname}`, startedAt, true));
+    }
+
+    const transport = isHttps ? https : http;
+
+    const req = transport.request(
+      url,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Webhook-Signature': header,
+          'Webhook-Id': deliveryId,
+          'User-Agent': 'webhook-delivery-service/1.0',
+          'Content-Length': Buffer.byteLength(rawBody),
+        },
+        lookup: ssrfSafeLookup,
       },
-      body: rawBody,
-    
-      redirect: 'manual',
-      signal: AbortSignal.timeout(timeoutMs),
+      (res) => {
+        let text = '';
+        let truncated = false;
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          if (truncated) return;
+          text += chunk;
+          if (text.length >= MAX_STORED_RESPONSE_CHARS) {
+            text = text.slice(0, MAX_STORED_RESPONSE_CHARS);
+            truncated = true;
+            res.destroy();
+          }
+        });
+        res.on('end', () => {
+          resolve({
+            statusCode: res.statusCode,
+            error: null,
+            durationMs: Date.now() - startedAt,
+            responseBody: text || null,
+            retryAfterHeader: res.headers['retry-after'] ?? null,
+            terminal: false,
+          });
+        });
+      },
+    );
+
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(Object.assign(new Error('timeout'), { name: 'TimeoutError' }));
     });
 
-  
-    const text = await response.text().catch(() => '');
+    req.on('error', (err) => {
+      const isTimeout = err.name === 'TimeoutError';
+      const isSsrf = err instanceof SsrfError;
+      resolve({
+        statusCode: null,
+        error: isTimeout ? `timeout after ${timeoutMs}ms` : `${err.name || 'Error'}: ${err.message}`,
+        durationMs: Date.now() - startedAt,
+        responseBody: null,
+        retryAfterHeader: null,
+        terminal: isSsrf,          // SSRF is permanent; timeouts/conn errors are transient
+      });
+    });
 
-    return {
-      statusCode: response.status,
-      error: null,
-      durationMs: Date.now() - startedAt,
-      responseBody: text.slice(0, MAX_STORED_RESPONSE_CHARS) || null,
-      // A 429 usually carries Retry-After: the subscriber telling us exactly
-      // when to come back. Ignoring it means walking straight back into the
-      // same rate limit.
-      retryAfterHeader: response.headers.get('retry-after'),
-    };
-  } catch (err) {
-    
-    const isTimeout = err.name === 'TimeoutError' || err.name === 'AbortError';
+    req.write(rawBody);
+    req.end();
+  });
+}
 
-    
-    const cause = err.cause;
-    const detail = cause?.code || cause?.message;
-
-    return {
-      statusCode: null,
-      error: isTimeout
-        ? `timeout after ${timeoutMs}ms`
-        : `${err.name}: ${err.message}${detail ? ` (${detail})` : ''}`,
-      durationMs: Date.now() - startedAt,
-      responseBody: null,
-      retryAfterHeader: null,
-    };
-  }
+function fail(message, startedAt, terminal = false) {
+  return {
+    statusCode: null,
+    error: message,
+    durationMs: Date.now() - startedAt,
+    responseBody: null,
+    retryAfterHeader: null,
+    terminal,
+  };
 }
 
 
@@ -160,8 +211,11 @@ async function processAttempt(delivery, deliveryId) {
     timeoutMs: env.WEBHOOK_TIMEOUT_MS,
   });
 
-  const outcome =
-    result.statusCode === null ? OUTCOME.RETRYABLE : classifyStatus(result.statusCode);
+  const outcome = result.terminal
+    ? OUTCOME.TERMINAL
+    : result.statusCode === null
+      ? OUTCOME.RETRYABLE
+      : classifyStatus(result.statusCode);
 
   deliveriesTotal.inc({ outcome });                       
   deliveryDuration.observe({ outcome }, result.durationMs / 1000);  

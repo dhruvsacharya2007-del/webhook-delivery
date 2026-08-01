@@ -28,6 +28,10 @@ const envSchema = z.object({
   DB_CONNECTION_LIMIT: z.coerce.number().int().positive().default(2),
 
   METRICS_PORT: z.coerce.number().int().positive().default(9091),
+
+ 
+  ALLOW_HTTP_WEBHOOKS: z.coerce.boolean().default(false),
+  SSRF_ALLOW_LOOPBACK: z.coerce.boolean().default(false),
 });
 
 const parsed = envSchema.safeParse(process.env);
