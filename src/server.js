@@ -5,7 +5,7 @@ const prisma = require('./lib/prisma');
 const { startMetricsServer } = require('./lib/metrics');
 const { startBacklogMetricsRefresher, stopBacklogMetricsRefresher } = require('./lib/backlog-metrics');
 
-const server = app.listen(env.PORT, () => {
+const server = app.listen(env.PORT, '0.0.0.0', () =>{
   logger.info(`Server listening on port ${env.PORT}`);
 });
 

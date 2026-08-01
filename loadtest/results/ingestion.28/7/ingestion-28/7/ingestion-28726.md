@@ -260,3 +260,60 @@ transactions. Remaining levers, in order of leverage:
   throughput. Real subscriber latency would lower absolute delivery rates.
 - `worker_active_jobs` frequently sampled as 0 because fast local batches complete between
   metric scrapes; under slower real endpoints it would sit non-zero.
+
+## SSRF hardening
+
+## Threat model
+
+The service makes outbound HTTP requests to user-supplied URLs — the textbook setup for Server-Side Request Forgery. An attacker registering a webhook endpoint at http://169.254.169.254/ (cloud metadata), http://10.0.0.1/admin (internal service), or http://127.0.0.1:5432/ (the database) turns the worker into a proxy into the trusted network.
+
+Defense: connection-time IP pinning via custom lookup hook
+
+Validation at registration is insufficient (DNS can change before delivery); validation at request time has a TOCTOU gap (the HTTP client re-resolves). Enforcement at connection time closes both: a custom dns.lookup hook resolves the hostname, validates every candidate IP against the blocklist, and returns only the vetted IP — the socket connects to the address that was checked, with no re-resolution.
+
+Blocklist covers: loopback (127/8), private (10/8, 172.16/12, 192.168/16), link-local including cloud metadata (169.254/16), CGNAT (100.64/10), multicast (224/4), unspecified (0.0.0.0, ::), IPv6 equivalents (::1, fe80::/10, fc00::/7, ff00::/8), and IPv4-mapped IPv6 (::ffff:127.0.0.1 → normalized to 127.0.0.1 before checking — a classic bypass).
+
+A literal-IP URL (e.g. https://10.0.0.1/) skips DNS resolution entirely, so the lookup hook never fires. A pre-request check (net.isIP(hostname) && isBlockedIp(...)) catches this path. Two entry points, same blocklist.
+
+## Additional hardening
+HTTPS-only in production (http gated behind a default-off ALLOW_HTTP_WEBHOOKS flag for dev/test).
+Redirects disabled — http.request does not auto-follow; 3xx classified terminal. Each redirect is effectively a new outbound request to an unvalidated destination.
+Permanent vs transient classification — SSRF blocks, bad-scheme, and malformed URLs fail terminally on attempt 1 (via a SsrfError class and a terminal flag in the result), rather than consuming the retry budget over 6 futile attempts.
+Dev escape hatch — SSRF_ALLOW_LOOPBACK (default false) permits loopback in dev/test so the localhost receiver works. Metadata/private ranges stay blocked even in dev (asserted by the unit test running the blocklist under both flag values).
+
+## Validation
+
+isBlockedIp is a pure function (no hidden env dependency), unit-tested against an exhaustive table of IPs in both allowLoopback: true and allowLoopback: false modes — proving the flag works both ways and dangerous ranges stay blocked regardless.
+SSRF block confirmed end-to-end: delivery to https://10.0.0.1 blocked instantly (durationMs: 1), classified terminal, attemptCount=1, status=FAILED. No packet left toward the private IP.
+
+
+## Circuit breaker
+
+## Problem
+
+A dead endpoint (subscriber offline) with a large backlog steals worker capacity: every delivery times out (~10s each), consuming worker slots and connection-pool capacity that healthy endpoints need. The fairness work (Days 9-10) prevents a busy endpoint from starving others; the breaker prevents a dead endpoint from starving others.
+
+## Design
+
+State: failureCount (Int, default 0) and breakerOpenUntil (DateTime, nullable) on the endpoints table. Breaker state is derived: openUntil IS NULL or <= NOW() → closed; > NOW() → open. No enum — store the minimum, derive the rest.
+
+Read side (claim query): JOIN endpoints with AND (breakerOpenUntil IS NULL OR breakerOpenUntil <= NOW()) excludes open-breaker endpoints at the query level. Deliveries to dead endpoints are never claimed (not claimed-then-skipped) — zero wasted work. FOR UPDATE OF dd SKIP LOCKED locks only delivery rows, not endpoint rows (without OF dd, the join would serialize all claims per endpoint).
+
+Write side (batch commit): per-endpoint net health delta aggregated within the batch (A′: failures - successes, floored at 0). One CTE-based UPDATE endpoints per affected endpoint per batch, in the same transaction as the delivery writes. When failureCount crosses the threshold: open the breaker (set breakerOpenUntil to NOW() + cooldown) and reset failureCount to 0.
+
+Model: cooldown-then-readmit (not true half-open). When the cooldown expires, all pending deliveries become claimable again. If the endpoint is still dead, the burst fails and the breaker re-opens. Accepts a burst each cycle; self-corrects fast.
+
+Failure metric: A′ net delta, not "consecutive." Consecutive failures are undefinable in a distributed concurrent batched system (no global ordering). A′ is magnitude-aware (99 failures / 1 success → +98, not 0), aggregates cleanly per batch, and self-heals (successes pull the count down).
+Configuration: BREAKER_FAILURE_THRESHOLD=5, BREAKER_COOLDOWN_SECONDS=30 (global env, configurable).
+
+## Validation (behavioral)
+
+Endpoint pointed at a receiver returning 500 (?mode=fail), 8 deliveries queued:
+
+Phase 1 (opens): first batch of 8 failures drove failureCount past threshold. breakerOpenUntil set ~30s out, failureCount reset to 0.
+
+Phase 2 (deferred): pending=8 held steady for ~30s while breakerOpenUntil was in the future. Worker did zero work on the failing endpoint — capacity preserved.
+
+Phase 3 (readmit): cooldown expired, deliveries re-claimed, all failed again, breaker re-opened with a fresh cooldown. Complete self-resetting cycle.
+
+The plateau during Phase 2 is the key proof: the worker stops burning timeouts on a known-dead endpoint, freeing capacity for healthy endpoints.
