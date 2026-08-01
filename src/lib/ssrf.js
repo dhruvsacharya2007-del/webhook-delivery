@@ -1,6 +1,7 @@
 const dns = require('node:dns');
 const net = require('node:net');
 // NOTE: no longer imports env — isBlockedIp is now a pure function.
+const env = require('../config/env');
 
 class SsrfError extends Error {
   constructor(message) {
@@ -22,7 +23,7 @@ function isBlockedIp(ip, { allowLoopback = false } = {}) {
 
   if (net.isIP(addr) === 4) {
     const [a, b] = addr.split('.').map(Number);
-    if (a === 127) return !allowLoopback;               // loopback (flag-dependent)
+    if (a === 127) return !allowLoopback;              // loopback (flag-dependent)
     if (a === 0) return true;
     if (a === 10) return true;
     if (a === 169 && b === 254) return true;
@@ -47,21 +48,30 @@ function isBlockedIp(ip, { allowLoopback = false } = {}) {
 // back exactly that vetted IP so the socket connects to THAT address with no
 // re-resolution — closing the DNS-rebinding / TOCTOU gap. Throws SsrfError to abort.
 
-const env = require('../config/env');
 
 function ssrfSafeLookup(hostname, options, callback) {
+  const allowLoopback = env.SSRF_ALLOW_LOOPBACK === true;
+
   if (net.isIP(hostname)) {
-    if (isBlockedIp(hostname)) return callback(new SsrfError(`SSRF blocked: ${hostname}`));
+    if (isBlockedIp(hostname, { allowLoopback })) {
+      return callback(new SsrfError(`SSRF blocked: ${hostname}`));
+    }
+    if (options.all) {
+      return callback(null, [{ address: hostname, family: net.isIP(hostname) }]);
+    }
     return callback(null, hostname, net.isIP(hostname));
   }
 
-  dns.lookup(hostname, { all: true, verbatim: true }, (err, addresses) => {
+  dns.lookup(hostname, { ...options, all: true }, (err, addresses) => {
     if (err) return callback(err);
-    const safe = addresses.find((a) => !isBlockedIp(a.address));
-    if (!safe) {
+    const safe = addresses.filter((a) => !isBlockedIp(a.address, { allowLoopback }));
+    if (safe.length === 0) {
       return callback(new SsrfError(`SSRF blocked: ${hostname} resolved only to disallowed addresses`));
     }
-    callback(null, safe.address, safe.family);
+    if (options.all) {
+      return callback(null, safe);
+    }
+    callback(null, safe[0].address, safe[0].family);
   });
 }
 

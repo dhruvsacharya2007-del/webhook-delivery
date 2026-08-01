@@ -1,5 +1,6 @@
 const prisma = require('../lib/prisma');
 const { Prisma } = require('../generated/prisma');
+const env = require('../config/env');
 
 function createMany(deliveries, client = prisma) {
   return client.delivery.createMany({
@@ -49,12 +50,14 @@ function claimDeliveries(batchSize, client = prisma) {
         "claimedAt" = NOW(),
         "updatedAt" = NOW()
     WHERE d.id IN (
-      SELECT id FROM deliveries
-      WHERE status = 'PENDING'::"DeliveryStatus"
-        AND "nextRetryAt" <= NOW()
-      ORDER BY "endpointSeq" ASC NULLS LAST, "nextRetryAt" ASC
+      SELECT dd.id FROM deliveries dd
+      JOIN endpoints e ON e.id = dd."endpointId"
+      WHERE dd.status = 'PENDING'::"DeliveryStatus"
+        AND dd."nextRetryAt" <= NOW()
+        AND (e."breakerOpenUntil" IS NULL OR e."breakerOpenUntil" <= NOW())
+      ORDER BY dd."endpointSeq" ASC NULLS LAST, dd."nextRetryAt" ASC
       LIMIT ${batchSize}
-      FOR UPDATE SKIP LOCKED
+       FOR UPDATE OF dd SKIP LOCKED
     )
     RETURNING d.id
   `;
@@ -157,21 +160,34 @@ function getBacklogCounts(client = prisma) {
     WHERE status = 'PENDING'::"DeliveryStatus"
   `;
 }
-function applyBatchWrites(writes, client = prisma) {
+function applyBatchWrites(writes, endpointDeltas, client = prisma) {
   return client.$transaction(async (tx) => {
     await tx.deliveryAttempt.createMany({ data: writes.map((w) => w.attemptRow) });
-    /*
-    prisma does something like 
-    INSERT INTO DeliveryAttempt
-    (deliveryId, attemptNumber, statusCode, error, durationMs)
-
-    VALUES
-    ('D1',1,200,NULL,150),
-    ('D2',1,500,'HTTP 500',220),
-    ('D3',2,NULL,'timeout after 10000ms',10000);
-    */
     for (const w of writes) {
       await tx.delivery.update({ where: { id: w.statusUpdate.id }, data: w.statusUpdate.data });
+    }
+
+    for (const [endpointId, delta] of endpointDeltas) {
+      await tx.$executeRaw`
+        WITH computed AS (
+          SELECT id, GREATEST(0, "failureCount" + ${delta}) AS new_count
+          FROM endpoints
+          WHERE id = ${endpointId}
+          FOR UPDATE
+        )
+        UPDATE endpoints e
+        SET "failureCount" = CASE
+              WHEN c.new_count >= ${env.BREAKER_FAILURE_THRESHOLD} THEN 0
+              ELSE c.new_count
+            END,
+            "breakerOpenUntil" = CASE
+              WHEN c.new_count >= ${env.BREAKER_FAILURE_THRESHOLD}
+              THEN NOW() + (${env.BREAKER_COOLDOWN_SECONDS} * INTERVAL '1 second')
+              ELSE e."breakerOpenUntil"
+            END
+        FROM computed c
+        WHERE e.id = c.id
+      `;
     }
   });
 }

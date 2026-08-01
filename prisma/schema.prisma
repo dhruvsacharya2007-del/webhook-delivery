@@ -26,7 +26,11 @@ model Endpoint {
   signingSecret String
   eventTypes    String[]
   enabled       Boolean  @default(true)
-  deliverySequence Int   @default(0)
+ 
+  deliverySequence Int      @default(0)
+  failureCount     Int      @default(0)
+  breakerOpenUntil DateTime?
+  
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 

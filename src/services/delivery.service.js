@@ -69,18 +69,22 @@ function sendSignedRequest({ url, secret, envelope, deliveryId, timeoutMs }) {
     const transport = isHttps ? https : http;
 
     const req = transport.request(
-      url,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Webhook-Signature': header,
-          'Webhook-Id': deliveryId,
-          'User-Agent': 'webhook-delivery-service/1.0',
-          'Content-Length': Buffer.byteLength(rawBody),
-        },
-        lookup: ssrfSafeLookup,
-      },
+    {
+    protocol: parsed.protocol,
+    hostname: parsed.hostname,
+    port: parsed.port || undefined,
+    path: parsed.pathname + parsed.search,
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Webhook-Signature': header,
+      'Webhook-Id': deliveryId,
+      'User-Agent': 'webhook-delivery-service/1.0',
+      'Content-Length': Buffer.byteLength(rawBody),
+    },
+    lookup: ssrfSafeLookup,
+    },
+  
       (res) => {
         let text = '';
         let truncated = false;
@@ -229,10 +233,12 @@ async function processAttempt(delivery, deliveryId) {
     'Delivery attempt finished',
   );
 
-  
+
   return {
     skip: false,
     outcome,
+    endpointId: delivery.endpointId,
+    succeeded: outcome === OUTCOME.SUCCESS,
     attemptRow: {
       deliveryId: delivery.id,
       attemptNumber,

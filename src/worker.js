@@ -10,7 +10,6 @@ const { startMetricsServer, workerActiveJobs, workerPollCycles } = require('./li
 
 
 
-
 let metricsServer = null;
 
 
@@ -59,12 +58,19 @@ async function processBatch() {
     writes.push(result.value);
   }
 
+  const endpointDeltas = new Map();
+  for (const w of writes) {
+    const prev = endpointDeltas.get(w.endpointId) || 0;
+    endpointDeltas.set(w.endpointId, prev + (w.succeeded ? -1 : 1));
+  }
+
   if (writes.length > 0) {
-    await deliveryRepository.applyBatchWrites(writes);
+  await deliveryRepository.applyBatchWrites(writes, endpointDeltas);
   }
 
   return claimed.length;
 }
+
 
 async function runReaper() {
   try {

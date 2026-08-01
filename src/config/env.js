@@ -32,6 +32,9 @@ const envSchema = z.object({
  
   ALLOW_HTTP_WEBHOOKS: z.coerce.boolean().default(false),
   SSRF_ALLOW_LOOPBACK: z.coerce.boolean().default(false),
+
+  BREAKER_FAILURE_THRESHOLD: z.coerce.number().int().positive().default(5),
+  BREAKER_COOLDOWN_SECONDS: z.coerce.number().int().positive().default(30),
 });
 
 const parsed = envSchema.safeParse(process.env);
